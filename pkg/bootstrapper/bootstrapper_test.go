@@ -293,3 +293,200 @@ func TestCloudConfInvalidNames(t *testing.T) {
 	err := wnb.parseIgnitionFileContents([]byte(ignitionContents), map[string]fileTranslation{})
 	assert.Error(t, err, "error not thrown on encountering invalid --cloud-config option")
 }
+
+// TestEnsureCNIConfigDirIsPresent tests ensureCNIConfigDirIsPresent creates the CNI directory when a valid install path
+// is passed to wmcb
+func TestEnsureCNIConfigDirIsPresent(t *testing.T) {
+	// Create a temp directory with wmcb prefix
+	installDir, err := ioutil.TempDir("", "wmcb")
+	require.NoError(t, err, "error creating temp directory")
+	// Ignore the return error as there is not much we can do if the temporary directory is not deleted
+	defer os.RemoveAll(installDir)
+
+	wnb := winNodeBootstrapper{
+		installDir: installDir,
+	}
+
+	err = wnb.ensureCNIDirIsPresent()
+	assert.NoError(t, err, "error creating CNI config directory %s", cniDirName)
+	assert.DirExists(t, filepath.Join(installDir, "cni", "config"), "CNI directory was not created")
+}
+
+// TestCheckCNIInputsInvalidInputs tests if checkCNIInputs throws the expected errors on passing invalid inputs
+func TestCheckCNIInputsInvalidInputs(t *testing.T) {
+	wnb := winNodeBootstrapper{
+		installDir: "C:\\DoesNotExist",
+	}
+
+	err := wnb.checkCNIInputs()
+	assert.Error(t, err, "no error on passing bad install dir")
+	assert.Contains(t, err.Error(), "error accessing install directory", "incorrect error thrown")
+
+	// Create a temp directory with wmcb prefix
+	installDir, err := ioutil.TempDir("", "wmcb")
+	require.NoError(t, err, "error creating temp directory")
+	// Ignore the return error as there is not much we can do if the temporary directory is not deleted
+	defer os.RemoveAll(installDir)
+
+	// Bad CNI path
+	wnb = winNodeBootstrapper{
+		installDir: installDir,
+		cniPath:    "C:\\DoesNotExists",
+	}
+
+	err = wnb.checkCNIInputs()
+	assert.Error(t, err, "no error on passing bad CNI path")
+	assert.Contains(t, err.Error(), "error accessing CNI path", "incorrect error thrown")
+
+	// CNI path as a file
+	cniPathFile, err := ioutil.TempFile(installDir, "cni")
+	require.NoError(t, err, "error creating file directory")
+
+	wnb = winNodeBootstrapper{
+		installDir: installDir,
+		cniPath:    cniPathFile.Name(),
+	}
+
+	err = wnb.checkCNIInputs()
+	assert.Error(t, err, "no error on passing file as CNI path")
+	assert.Contains(t, err.Error(), "CNI path cannot be a file", "incorrect error thrown")
+
+	// Bad CNI config
+	wnb = winNodeBootstrapper{
+		installDir: installDir,
+		cniPath:    installDir,
+		cniConfig:  "C:\\DoesNotExist.conf",
+	}
+
+	err = wnb.checkCNIInputs()
+	assert.Error(t, err, "no error on passing bad CNI config")
+	assert.Contains(t, err.Error(), "error accessing CNI config", "incorrect error thrown")
+
+	// CNI config as directory
+	wnb = winNodeBootstrapper{
+		installDir: installDir,
+		cniPath:    installDir,
+		cniConfig:  installDir,
+	}
+
+	err = wnb.checkCNIInputs()
+	assert.Error(t, err, "no error on passing dir as CNI config")
+	assert.Contains(t, err.Error(), "CNI config cannot be a directory", "incorrect error thrown")
+}
+
+// TestCopyCNIFilesInvalidInputs tests if copyCNIFiles() throws the expected errors on passing invalid inputs
+func TestCopyCNIFilesInvalidInputs(t *testing.T) {
+	// Create a temp directory with wmcb prefix
+	installDir, err := ioutil.TempDir("", "wmcb")
+	require.NoError(t, err, "error creating temp directory")
+	// Ignore the return error as there is not much we can do if the temporary directory is not deleted
+	defer os.RemoveAll(installDir)
+
+	// Bad CNI path
+	wnb := winNodeBootstrapper{
+		installDir: installDir,
+		cniPath:    "C:\\DoesNotExists",
+	}
+
+	err = wnb.copyCNIFiles()
+	assert.Error(t, err, "no error on passing bad CNI path")
+	assert.Contains(t, err.Error(), "error reading CNI path", "incorrect error thrown")
+
+	// No files
+	wnb = winNodeBootstrapper{
+		installDir: installDir,
+		cniPath:    installDir,
+	}
+
+	err = wnb.copyCNIFiles()
+	assert.Error(t, err, "no error on passing empty CNI path")
+	assert.Contains(t, err.Error(), "no files present", "incorrect error thrown")
+}
+
+// TestCopyCNIFiles tests if copyCNIFiles() copies the CNI input binaries and config to the appropriate install location
+func TestCopyCNIFiles(t *testing.T) {
+	// Create a temp directory with wmcb prefix
+	installDir, err := ioutil.TempDir("", "wmcb")
+	require.NoError(t, err, "error creating temp directory")
+	// Ignore the return error as there is not much we can do if the temporary directory is not deleted
+	defer os.RemoveAll(installDir)
+
+	// Create a temp directory with cni prefix
+	cniPath, err := ioutil.TempDir("", "cni")
+	require.NoError(t, err, "error creating temp CNI directory")
+	// Ignore the return error as there is not much we can do if the temporary directory is not deleted
+	defer os.RemoveAll(cniPath)
+
+	// Create temp CNI file
+	cniFile, err := ioutil.TempFile(cniPath, "cni.exe")
+	require.NoError(t, err, "error creating CNI file")
+
+	// Create temp CNI config dir
+	cniConfigPath, err := ioutil.TempDir(cniPath, "cni")
+	require.NoError(t, err, "error creating temp CNI config directory")
+
+	// Create temp CNI config file
+	cniConfig, err := ioutil.TempFile(cniConfigPath, "cni.conf")
+	require.NoError(t, err, "error creating CNI config")
+
+	wnb := winNodeBootstrapper{
+		installDir:           installDir,
+		cniPath:              cniPath,
+		cniConfig:            cniConfig.Name(),
+		cniInstallDir:        filepath.Join(installDir, cniDirName),
+		cniConfigInstallPath: filepath.Join(installDir, cniConfigDirName),
+	}
+
+	err = wnb.ensureCNIDirIsPresent()
+	require.NoError(t, err, "error creating CNI config directory %s", cniDirName)
+	require.DirExists(t, filepath.Join(installDir, "cni", "config"), "CNI directory was not created")
+
+	err = wnb.copyCNIFiles()
+	assert.NoError(t, err, "unexpected error")
+	assert.FileExists(t, filepath.Join(installDir, "cni", filepath.Base(cniFile.Name())), "CNI file was not copied")
+	assert.FileExists(t, filepath.Join(installDir, "cni", "config", filepath.Base(cniConfig.Name())),
+		"CNI config file was not copied")
+}
+
+// TestUpdateKubeletArgsForCNI tests if updateKubeletArgsForCNI() updates the kubelet args correctly
+func TestUpdateKubeletArgsForCNI(t *testing.T) {
+	// kubelet command without CNI parameters
+	kubeletCmd := "c:\\k\\kubelet.exe --config=c:\\k\\kubelet.conf --bootstrap-kubeconfig=c:\\k\\bootstrap-kubeconfig " +
+		"--kubeconfig=c:\\k\\kubeconfig --pod-infra-container-image=mcr.microsoft.com/k8s/core/pause:1.2.0 " +
+		"--cert-dir=c:/var/lib/kubelet/pki/ --windows-service --logtostderr=false --log-file=c:\\k\\kubelet.log " +
+		"--register-with-taints=os=Windows:NoSchedule --cloud-provider=aws --v=3"
+
+	installDir := "C:\\k"
+	cniInstallDir := filepath.Join(installDir, "cni")
+	cniConfigInstallPath := filepath.Join(cniInstallDir, "config")
+	wnb := winNodeBootstrapper{
+		installDir:           installDir,
+		cniInstallDir:        cniInstallDir,
+		cniConfigInstallPath: cniConfigInstallPath,
+	}
+
+	wnb.updateKubeletArgsForCNI(&kubeletCmd)
+
+	// Assert that the CNI parameters were added correctly
+	assert.Contains(t, kubeletCmd, "--resolv-conf=\"\"", "--resolv-conf missing in kubelet args")
+	assert.Contains(t, kubeletCmd, "--network-plugin=cni", "--network-plugin missing in kubelet args")
+	assert.Contains(t, kubeletCmd, "--cni-bin-dir="+cniInstallDir, "--cni-bin-dir missing in kubelet args")
+	assert.Contains(t, kubeletCmd, "--cni-conf-dir="+cniConfigInstallPath, "--cni-conf-dir missing in kubelet args")
+	assert.NotContains(t, kubeletCmd, "--cni-conf-dir="+cniConfigInstallPath+"cni.conf", "cni.conf present in kubelet args")
+
+	// kubelet command with CNI parameters set to different values
+	kubeletCmd = "c:\\k\\kubelet.exe --config=c:\\k\\kubelet.conf --bootstrap-kubeconfig=c:\\k\\bootstrap-kubeconfig " +
+		"--kubeconfig=c:\\k\\kubeconfig --pod-infra-container-image=mcr.microsoft.com/k8s/core/pause:1.2.0 " +
+		"--cert-dir=c:/var/lib/kubelet/pki/ --windows-service --logtostderr=false --log-file=c:\\k\\kubelet.log " +
+		"--register-with-taints=os=Windows:NoSchedule --cloud-provider=aws --v=3 --resolv-conf=d:\\k\\etc\\resolv.conf" +
+		"--network-plugin=xyz --cni-bin-dir=d:\\k\\cni --cni-conf-dir=d:\\k\\cni\\config\\cni.conf"
+
+	wnb.updateKubeletArgsForCNI(&kubeletCmd)
+
+	// Assert that the CNI parameters were restored correctly
+	assert.Contains(t, kubeletCmd, "--resolv-conf=\"\"", "--resolv-conf missing in kubelet args")
+	assert.Contains(t, kubeletCmd, "--network-plugin=cni", "--network-plugin missing in kubelet args")
+	assert.Contains(t, kubeletCmd, "--cni-bin-dir="+cniInstallDir, "--cni-bin-dir missing in kubelet args")
+	assert.Contains(t, kubeletCmd, "--cni-conf-dir="+cniConfigInstallPath, "--cni-conf-dir missing in kubelet args")
+	assert.NotContains(t, kubeletCmd, "--cni-conf-dir="+cniConfigInstallPath+"cni.conf", "cni.conf present in kubelet args")
+}

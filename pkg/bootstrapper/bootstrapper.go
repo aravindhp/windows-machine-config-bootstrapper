@@ -64,6 +64,24 @@ const (
 	windowsTaints = "os=Windows:NoSchedule"
 	// workerLabel contains the label that needs to be applied to the worker nodes in the cluster
 	workerLabel = "node-role.kubernetes.io/worker"
+	// cniDirName is the directory within the install path where the CNI binaries are placed
+	cniDirName = "cni"
+	// cniConfigDirName is the directory in the CNI path where the cni.conf is placed
+	cniConfigDirName = cniDirName + "/config/"
+
+	// kubelet CLI options for networking
+	// resolvOption is to specify the resolv.conf
+	resolvOption = "--resolv-conf"
+	// resolvValue is the default value passed to the resolv option
+	resolvValue = "\"\""
+	// networkPluginOption is to specify the network plugin type
+	networkPluginOption = "--network-plugin"
+	// networkPluginValue is the default network plugin that we support
+	networkPluginValue = "cni"
+	// cniBinDirOption is to specify the CNI binary directory
+	cniBinDirOption = "--cni-bin-dir"
+	// cniConfDirOption is to specify the CNI conf directory
+	cniConfDirOption = "--cni-conf-dir"
 )
 
 // These regex are global, so that we only need to compile them once
@@ -82,6 +100,18 @@ var (
 	// comma separated values.
 	// Example: --node-labels=node-role.kubernetes.io/worker,node.openshift.io/os_id=${ID}
 	nodeLabelRegex = regexp.MustCompile(`--node-labels=(.*)`)
+
+	// resolvRegex searches for the resolv option given to the kubelet
+	resolvRegex = regexp.MustCompile(resolvOption + `=(\S*)`)
+
+	// networkPluginRegex searches for the network plugin option given to the kubelet
+	networkPluginRegex = regexp.MustCompile(networkPluginOption + `=(\w*)`)
+
+	// cniBinDirRegex searches for the CNI bin dir option given to the kubelet
+	cniBinDirRegex = regexp.MustCompile(cniBinDirOption + `=(\S*)`)
+
+	// cniConfDirRegex searches for the CNI conf dir option given to the kubelet
+	cniConfDirRegex = regexp.MustCompile(cniConfDirOption + `=(\S*)`)
 )
 
 // winNodeBootstrapper is responsible for bootstrapping and ensuring kubelet runs as a Windows service
@@ -104,23 +134,37 @@ type winNodeBootstrapper struct {
 	installDir string
 	// kubeletArgs is a map of the variable arguments that will be passed to the kubelet
 	kubeletArgs map[string]string
+	// cniPath is the input path where the CNI binaries are present
+	cniPath string
+	// cniConfig is the input CNI configuration file
+	cniConfig string
+	// cniInstallDir is the directory where the CNI binaries will be placed
+	cniInstallDir string
+	// cniConfigInstallPath is the directory where the CNI config will be placed
+	cniConfigInstallPath string
 }
 
-// NewWinNodeBootstrapper takes the path to install the kubelet to, and paths to the ignition file and kubelet as inputs,
-// and generates the winNodeBootstrapper object
-func NewWinNodeBootstrapper(k8sInstallDir, ignitionFile, kubeletPath string) (*winNodeBootstrapper, error) {
+// NewWinNodeBootstrapper takes the path to install the kubelet to, and paths to the ignition file, kubelet and CNI
+// files as inputs, and generates the winNodeBootstrapper object. The ignitionFile and kubeletPath are specified when
+// initializing the kubelet. The cniPath and cniConfig are specified only when configuring CNI.
+func NewWinNodeBootstrapper(k8sInstallDir, ignitionFile, kubeletPath, cniPath, cniConfig string) (*winNodeBootstrapper, error) {
 	svcMgr, err := mgr.Connect()
 	if err != nil {
 		return nil, fmt.Errorf("could not connect to Windows SCM: %s", err)
 	}
+
 	bootstrapper := winNodeBootstrapper{
-		kubeconfigPath:     filepath.Join(k8sInstallDir, "kubeconfig"),
-		kubeletConfPath:    filepath.Join(k8sInstallDir, "kubelet.conf"),
-		ignitionFilePath:   ignitionFile,
-		installDir:         k8sInstallDir,
-		initialKubeletPath: kubeletPath,
-		svcMgr:             svcMgr,
-		kubeletArgs:        make(map[string]string),
+		kubeconfigPath:       filepath.Join(k8sInstallDir, "kubeconfig"),
+		kubeletConfPath:      filepath.Join(k8sInstallDir, "kubelet.conf"),
+		ignitionFilePath:     ignitionFile,
+		installDir:           k8sInstallDir,
+		initialKubeletPath:   kubeletPath,
+		svcMgr:               svcMgr,
+		kubeletArgs:          make(map[string]string),
+		cniPath:              cniPath,
+		cniConfig:            cniConfig,
+		cniInstallDir:        filepath.Join(k8sInstallDir, cniDirName),
+		cniConfigInstallPath: filepath.Join(k8sInstallDir, cniConfigDirName),
 	}
 	// If there is already a kubelet service running, find it
 	if ksvc, err := svcMgr.OpenService(KubeletServiceName); err == nil {
@@ -324,6 +368,10 @@ func (wmcb *winNodeBootstrapper) initializeKubeletFiles() error {
 // createKubeletService creates a new kubelet service to our specifications
 func (wmcb *winNodeBootstrapper) createKubeletService() error {
 	var err error
+	// If initialize-kubelet is run after configure-cni, the kubelet args will be overwritten and the CNI
+	// configuration will be lost. The assumption is that every time initialize-kubelet is run, configure-cni needs to
+	// be run again. This is how the WSU playbook is written and we don't expect users to execute WMCB directly.
+	// TBD: If this is not desirable then it should be fixed in a follow up PR.
 	kubeletArgs := []string{
 		"--config=" + wmcb.kubeletConfPath,
 		"--bootstrap-kubeconfig=" + filepath.Join(wmcb.installDir, "bootstrap-kubeconfig"),
@@ -338,12 +386,6 @@ func (wmcb *winNodeBootstrapper) createKubeletService() error {
 		// TODO: Write a `against the cluster` e2e test which checks for the Windows node object created
 		// and check for taint.
 		"--register-with-taints=" + windowsTaints,
-		// TODO: Uncomment this when we have a CNI solution
-		/*
-			network-plugin=cni",
-			cni-bin-dir=" + filepath.Join(k8sInstallDir, "cni"),
-			cni-conf-dir=" + filepath.Join(k8sInstallDir, "cni"),
-		*/
 	}
 	if cloudProvider, ok := wmcb.kubeletArgs["cloud-provider"]; ok {
 		kubeletArgs = append(kubeletArgs, "--cloud-provider="+cloudProvider)
@@ -437,7 +479,6 @@ func (wmcb *winNodeBootstrapper) stopKubeletService() error {
 	return wmcb.controlService(svc.Stop, svc.Stopped)
 }
 
-// TODO: Remove OVN service as well
 // StopAndRemoveServices stops and removes the kubelet service
 func (wmcb *winNodeBootstrapper) StopAndRemoveServices() error {
 	if wmcb.kubeletSVC == nil {
@@ -489,6 +530,163 @@ func (wmcb *winNodeBootstrapper) InitializeKubelet() error {
 	if err != nil {
 		return fmt.Errorf("failed to start kubelet windows service: %v", err)
 	}
+	return nil
+}
+
+// checkCNIInputs checks if there are any issues with the CNI inputs to WMCB and returns an error if there is
+func (wmcb *winNodeBootstrapper) checkCNIInputs() error {
+	// Check if there are any issues accessing the installation directory. We don't want to proceed on any error as it
+	// could cause issues further down the line when copying the files.
+	if _, err := os.Stat(wmcb.installDir); err != nil {
+		return fmt.Errorf("error accessing install directory %s: %v", wmcb.cniPath, err)
+	}
+
+	// Check if there are any issues accessing the CNI path. We don't want to proceed on any error as it could cause
+	// issues further down the line when copying the files.
+	cniPathInfo, err := os.Stat(wmcb.cniPath)
+	if err != nil {
+		return fmt.Errorf("error accessing CNI path %s: %v", wmcb.cniPath, err)
+	}
+	if !cniPathInfo.IsDir() {
+		return fmt.Errorf("CNI path cannot be a file")
+	}
+
+	// Check if there are any issues accessing the CNI configuration file. We don't want to proceed on any error as it
+	// could cause issues further down the line when copying the files.
+	cniConfigInfo, err := os.Stat(wmcb.cniConfig)
+	if err != nil {
+		return fmt.Errorf("error accessing CNI config %s: %v", wmcb.cniConfig, err)
+	}
+	if cniConfigInfo.IsDir() {
+		return fmt.Errorf("CNI config cannot be a directory")
+	}
+
+	return nil
+}
+
+// copyCNIFiles() copies the CNI binaries and config to the installation directory
+func (wmcb *winNodeBootstrapper) copyCNIFiles() error {
+	// Example: C:\k\ + cni
+	// cniDir := filepath.Join(wmcb.installDir, cniDirName)
+	files, err := ioutil.ReadDir(wmcb.cniPath)
+	if err != nil {
+		return fmt.Errorf("error reading CNI path %s: %v", wmcb.cniPath, err)
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no files present in CNI path %s", wmcb.cniPath)
+	}
+
+	// Copy the CNI binaries from the input CNI path to the CNI installation directory
+	for _, file := range files {
+		// Ignore directories for now. If we find that there are CNI packages with nested directories, we can update
+		// this to loop to be recursive.
+		if file.IsDir() {
+			continue
+		}
+
+		// C:\source\cni\filename
+		src := filepath.Join(wmcb.cniPath, file.Name())
+		// C:\k\cni\filename
+		dest := filepath.Join(wmcb.cniInstallDir, file.Name())
+		if err = copyFile(src, dest); err != nil {
+			return fmt.Errorf("error copying %s --> %s: %v", src, dest, err)
+		}
+	}
+
+	// Copy the CNI config to the CNI configuration directory. Example: C:\k\cni\config\cni.conf
+	cniConfigDest := filepath.Join(wmcb.cniConfigInstallPath, filepath.Base(wmcb.cniConfig))
+	if err = copyFile(wmcb.cniConfig, cniConfigDest); err != nil {
+		return fmt.Errorf("error copying CNI config %s --> %s: %v", wmcb.cniConfig, cniConfigDest, err)
+	}
+	return nil
+}
+
+// ensureCNIDirIsPresent ensures that CNI parent and child directories are present on the system.
+func (wmcb *winNodeBootstrapper) ensureCNIDirIsPresent() error {
+	// By checking for the config directory, we can ensure both parent and child directories are present
+	configDir := filepath.Join(wmcb.installDir, cniConfigDirName)
+	if _, err := os.Stat(configDir); err != nil {
+		if os.IsNotExist(err) {
+			// 0700 == Only user has access
+			if err = os.MkdirAll(configDir, 0700); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+	return nil
+}
+
+// updateKubeletArgs updates the kubelet command with the given option and value. search is used to find the the option
+// within the args. Note that if the option exists, it will be overwritten.
+func updateKubeletArgs(kubeletCmd *string, option, value string, search *regexp.Regexp) {
+	results := search.FindStringSubmatch(*kubeletCmd)
+	// Replace the existing values as we only support the CNI plugin
+	if len(results) > 0 {
+		*kubeletCmd = strings.Replace(*kubeletCmd, results[0], "", -1)
+	}
+	*kubeletCmd += " " + option + "=" + value
+}
+
+// updateKubeletArgsForCNI updates the given kubelet command with the CNI args.
+// Example: --resolv-conf="" --network-plugin=cni --cni-bin-dir=C:\k\cni --cni-conf-dir=c:\k\cni\config
+func (wmcb *winNodeBootstrapper) updateKubeletArgsForCNI(kubeletCmd *string) {
+	updateKubeletArgs(kubeletCmd, resolvOption, resolvValue, resolvRegex)
+	updateKubeletArgs(kubeletCmd, networkPluginOption, networkPluginValue, networkPluginRegex)
+	updateKubeletArgs(kubeletCmd, cniBinDirOption, wmcb.cniInstallDir, cniBinDirRegex)
+	updateKubeletArgs(kubeletCmd, cniConfDirOption, wmcb.cniConfigInstallPath, cniConfDirRegex)
+}
+
+// updateKubeletServiceForCNI updates the kubelet service with the CNI configuration
+func (wmcb *winNodeBootstrapper) updateKubeletServiceForCNI() error {
+	if err := wmcb.stopKubeletService(); err != nil {
+		return fmt.Errorf("error stopping kubelet service: %v", err)
+	}
+
+	config, err := wmcb.kubeletSVC.Config()
+	if err != nil {
+		return fmt.Errorf("error getting kubelet service config: %v", err)
+	}
+
+	wmcb.updateKubeletArgsForCNI(&config.BinaryPathName)
+
+	if err = wmcb.kubeletSVC.UpdateConfig(config); err != nil {
+		return fmt.Errorf("error updating kubelet service: %v", err)
+	}
+
+	if err = wmcb.startKubeletService(); err != nil {
+		return fmt.Errorf("error starting kubelet service: %v", err)
+	}
+
+	return nil
+}
+
+// ConfigureCNI performs the CNI configuration. It sets up the CNI config, updates the kubelet service with CNI
+// parameters and restarts the kubelet service.
+func (wmcb *winNodeBootstrapper) ConfigureCNI() error {
+	// We cannot proceed if the kubelet service is not present on the system as we need to update it with the CNI
+	// configuration
+	if wmcb.kubeletSVC == nil {
+		return fmt.Errorf("kubelet service is not present")
+	}
+
+	if err := wmcb.checkCNIInputs(); err != nil {
+		return err
+	}
+
+	if err := wmcb.ensureCNIDirIsPresent(); err != nil {
+		return fmt.Errorf("unable to create CNI directory %s: %v", filepath.Join(wmcb.cniPath, cniConfigDirName), err)
+	}
+
+	if err := wmcb.copyCNIFiles(); err != nil {
+		return fmt.Errorf("unable to copy CNI files: %v", err)
+	}
+
+	if err := wmcb.updateKubeletServiceForCNI(); err != nil {
+		return fmt.Errorf("unable to update kubelet service for CNI: %v", err)
+	}
+
 	return nil
 }
 

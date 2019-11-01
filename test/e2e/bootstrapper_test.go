@@ -48,10 +48,12 @@ func TestBootstrapper(t *testing.T) {
 	if !kubeletRunningBeforeTest {
 		// Remove the kubelet logfile, so that when we parse it, we are looking at the current run only
 		removeFileIfExists(t, kubeletLogPath)
+
+		t.Run("Configure CNI without kubelet service present", testConfigureCNIWithoutKubeletSvc)
 	}
 
 	// Run the bootstrapper, which will start the kubelet service
-	wmcb, err := bootstrapper.NewWinNodeBootstrapper(installDir, ignitionFilePath, kubeletPath)
+	wmcb, err := bootstrapper.NewWinNodeBootstrapper(installDir, ignitionFilePath, kubeletPath, "", "")
 	assert.Nilf(t, err, "Could not create WinNodeBootstrapper: %s", err)
 	err = wmcb.InitializeKubelet()
 	assert.Nilf(t, err, "Could not run bootstrapper: %s", err)
@@ -73,9 +75,11 @@ func TestBootstrapper(t *testing.T) {
 		assert.True(t, isKubeletRunning(t, kubeletLogPath))
 	})
 
+	t.Run("Configure CNI", testConfigureCNI)
+
 	// Run it again, to ensure it maintains state if the bootstrapper is already started
 	time.Sleep(5 * time.Second)
-	wmcb, err = bootstrapper.NewWinNodeBootstrapper(installDir, ignitionFilePath, kubeletPath)
+	wmcb, err = bootstrapper.NewWinNodeBootstrapper(installDir, ignitionFilePath, kubeletPath, "", "")
 	assert.Nilf(t, err, "Could not create WinNodeBootstrapper: %s", err)
 	err = wmcb.InitializeKubelet()
 	assert.Nilf(t, err, "Could not run bootstrapper: %s", err)
@@ -87,6 +91,9 @@ func TestBootstrapper(t *testing.T) {
 		time.Sleep(2 * time.Second)
 		assert.Truef(t, svcRunning(t, bootstrapper.KubeletServiceName), "The kubelet service is not running")
 	})
+
+	t.Run("Configure CNI service after initialize-kubelet is run a second time", testConfigureCNI)
+
 }
 
 // ensureIgnitionFileExists will create a generic ignition file if one is not provided on the node
