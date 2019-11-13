@@ -14,6 +14,10 @@ import (
 	"github.com/openshift/windows-machine-config-operator/tools/windows-node-installer/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 var (
@@ -41,6 +45,8 @@ var (
 	createdInstanceCreds *types.Credentials
 	// Temp directory ansible created on the windows host
 	ansibleTempDir = ""
+	// k8sclientset is the kubernetes clientset we will use to query the cluster's status
+	k8sclientset *kubernetes.Clientset
 )
 
 // createAWSWindowsInstance creates a windows instance and populates the "cloud" and "createdInstanceCreds" global
@@ -90,11 +96,16 @@ func TestWSU(t *testing.T) {
 	require.NotEmptyf(t, playbookPath, "WSU_PATH environment variable not set")
 	require.NotEmptyf(t, clusterAddress, "CLUSTER_ADDR environment variable not set")
 
+	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	require.NoError(t, err, "Could not build kubeconfig")
+	k8sclientset, err = kubernetes.NewForConfig(config)
+	require.NoError(t, err, "Could create k8s clientset")
+
 	// TODO: Check if other cloud provider credentials are available
 	if awsCredentials == "" {
 		t.Fatal("No cloud provider credentials available")
 	}
-	err := createAWSWindowsInstance()
+	err = createAWSWindowsInstance()
 	require.NoErrorf(t, err, "Error spinning up Windows VM: %s", err)
 	require.NotNil(t, createdInstanceCreds, "Instance credentials are not set")
 	defer cloud.DestroyWindowsVMs()
@@ -113,7 +124,7 @@ func TestWSU(t *testing.T) {
 	ansibleTempDir = "C:\\Users\\Administrator\\AppData\\Local\\Temp\\ansible." + strings.Split(initialSplit[1], "\"")[0]
 
 	t.Run("Files copied to Windows node", testFilesCopied)
-	// TODO: Once the WSU starts the WMCB and adds the node to the cluster, add check to see if the node is "Ready"
+	t.Run("Node is in ready state", testNodeReady)
 }
 
 // testFilesCopied tests that the files we attempted to copy to the Windows host, exist on the Windows host
@@ -134,5 +145,39 @@ func testFilesCopied(t *testing.T) {
 		assert.NoError(t, err, "Error looking for %s: %s", fullPath, err)
 		assert.Emptyf(t, stdout.String(), "Missing file: %s", fullPath)
 	}
+}
 
+// testNodeReady tests that the bootstrapped node was added to the cluster and is in the ready state
+func testNodeReady(t *testing.T) {
+	var createdNode *v1.Node
+	nodes, err := k8sclientset.CoreV1().Nodes().List(metav1.ListOptions{})
+	require.NoError(t, err, "Could not get list of nodes")
+	require.NotZero(t, len(nodes.Items), "No nodes found")
+
+	// Find the node that we spun up
+	for _, node := range nodes.Items {
+		for _, address := range node.Status.Addresses {
+			if address.Type == "ExternalIP" && address.Address == createdInstanceCreds.GetIPAddress() {
+				createdNode = &node
+				break
+			}
+		}
+		if createdNode != nil {
+			break
+		}
+	}
+	require.NotNil(t, createdNode, "Created node not found through Kubernetes API")
+
+	// Make sure the node is in a ready state
+	foundReady := false
+	for _, condition := range createdNode.Status.Conditions {
+		if condition.Type != v1.NodeReady {
+			continue
+		}
+		foundReady = true
+		assert.Equalf(t, v1.ConditionTrue, condition.Status, "Node not in ready state: %s", condition.Reason)
+		break
+	}
+	// Just in case node is missing the ready condition, for whatever reason
+	assert.True(t, foundReady, "Node did not have ready condition")
 }
