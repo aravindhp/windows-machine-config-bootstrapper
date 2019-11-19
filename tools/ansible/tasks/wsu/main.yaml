@@ -44,15 +44,6 @@
             src: "{{ tmp_dir.path }}/kubernetes/node/bin/kubelet.exe"
             dest: "{{ tmp_dir.path }}/kubelet.exe"
 
-        # Assuming bootstrap has been run, get all the Windows node bootstrapped via WMCB which have no worker labels.
-        - name: Get all the Windows node bootstrapped via WMCB without worker labels
-          shell: "oc get nodes -l 'node.openshift.io/os_id=Windows, !node-role.kubernetes.io/worker' -o name"
-          register: windows_nodes_without_worker_labels
-
-        # Apply worker label to the Windows nodes bootstrapped via WMCB
-        - name: Label all the Windows nodes without worker labels
-          shell: "oc label {{ item }} node-role.kubernetes.io/worker="
-          with_items: "{{ windows_nodes_without_worker_labels.stdout_lines }}"
 
         # Transfer the hybrid-overlay binary to the Windows node
         - name: Transfer hybrid-overlay to the Windows node
@@ -107,7 +98,7 @@
     - name: Get ignition file
       win_get_url:
         url: "https://api-int.{{ cluster_address }}:22623/config/worker"
-        dest: "{{ win_temp_cni_dir.path }}\\worker.ign"
+        dest: "{{ win_temp_dir.path }}\\worker.ign"
         validate_certs: no
 
     - name: Run bootstrapper
@@ -124,6 +115,7 @@
         seconds: 60
 
     - name: Check for bootstrap CSR
+      delegate_to: localhost
       shell: "oc get csr | awk '/system:serviceaccount:openshift-machine-config-operator:node-bootstrapper/ && /Pending/ {print $1}'"
       register: bootstrap_csrs
       until: bootstrap_csrs.stdout != ""
@@ -140,6 +132,7 @@
         seconds: 60
 
     - name: Wait for node CSR
+      delegate_to: localhost
       shell: "oc get csr | awk '/system:node:/ && /Pending/ {print $1}'"
       register: node_csrs
       until: node_csrs.stdout != ""
@@ -151,10 +144,28 @@
       shell: "oc adm certificate approve {{ item }}"
       with_items: "{{ node_csrs.stdout_lines }}"
 
+    # Assuming bootstrap has been run, get all the Windows node bootstrapped via WMCB which have no worker labels.
+    - name: Get all the Windows node bootstrapped via WMCB without worker labels
+      delegate_to: localhost
+      shell: "oc get nodes -l 'node.openshift.io/os_id=Windows, !node-role.kubernetes.io/worker' -o name"
+      register: windows_nodes_without_worker_labels
+
+    # Apply worker label to the Windows nodes bootstrapped via WMCB
+    - name: Label all the Windows nodes without worker labels
+      delegate_to: localhost
+      shell: "oc label {{ item }} node-role.kubernetes.io/worker="
+      with_items: "{{ windows_nodes_without_worker_labels.stdout_lines }}"
+
     - name: Run hybrid overlay
-      win_shell: "{{ win_temp_dir.path }}\\hybrid-overlay.exe --node  {{ item }} --k8s-kubeconfig c:\\k\\kubeconfig"
-      with_items: "{{ hostvars['localhost']['windows_nodes_without_worker_labels.stdout_lines'] }}"
+      win_shell: "Start-Process -NoNewWindow -FilePath \"{{ win_temp_cni_dir }}\\hybrid_overlay.exe\" -ArgumentList \"--node  {{ item | replace('node/', '') }} --k8s-kubeconfig c:\\k\\kubeconfig""
+      with_items: "{{ windows_nodes_without_worker_labels.stdout_lines }}"
+      async: 60
+      poll: 0
+
+    - name: Wait for OpenShift HNS network
+      pause:
+        seconds: 60
 
     - name: Run WMCB cni config
-      win_shell: "{{ win_temp_dir.path }}\\wmcb.exe configure-cni --cni-path {{ win_temp_cni_dir }} --cni-config {{ win_temp_cni_dir }}/cni.conf"
+      win_shell: "{{ win_temp_dir.path }}\\wmcb.exe configure-cni --cni-path {{ win_temp_cni_dir.path }} --cni-config {{ win_temp_cni_dir.path }}\\cni.conf"
       register: bootstrap_out
