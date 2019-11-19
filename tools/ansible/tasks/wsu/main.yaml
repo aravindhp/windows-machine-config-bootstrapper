@@ -3,7 +3,7 @@
   vars:
     project_root: "{{ playbook_dir }}/../../../.."
     kubelet_location: "https://dl.k8s.io/v1.16.2/kubernetes-node-windows-amd64.tar.gz"
-    hybrid-overlay_location: "https://github.com/openshift/windows-machine-config-operator/releases/download/0.1/hybrid-overlay.exe"
+    hybrid_overlay_location: "https://github.com/openshift/windows-machine-config-operator/releases/download/0.1/hybrid-overlay.exe"
     cni_location: "https://github.com/containernetworking/plugins/releases/download/v0.8.2/cni-plugins-windows-amd64-v0.8.2.tgz"
     wmcb_exe: "wmcb.exe"
 
@@ -17,9 +17,9 @@
           register: tmp_dir
 
         - name: Create directory to store cni binaries to be used later
-            tempfile:
-              state: directory
-            register: tmp_cnidir
+          tempfile:
+            state: directory
+          register: tmp_cnidir
 
         - name: Build WMCB
           make:
@@ -57,7 +57,7 @@
         # Transfer the hybrid-overlay binary to the Windows node
         - name: Transfer hybrid-overlay to the Windows node
           get_url:
-            src: "{{ hybrid-overlay_location }}"
+            url: "{{ hybrid_overlay_location }}"
             dest: "{{ tmp_cnidir.path }}/hybrid_overlay.exe"
 
         # Download the required cni binaries
@@ -78,8 +78,6 @@
           copy:
             src: "cni.conf"
             dest: "{{ tmp_cnidir.path }}/cni.conf"
-
-
 
 - hosts: win
   vars:
@@ -102,9 +100,9 @@
         dest: "{{ win_temp_dir.path }}"
 
     - name: Copy cni files to the Windows host
-      win_copy: "{{ hostvars['localhost']['tmp_cnidir']['path'] }}/"
+      win_copy:
         src: "{{ hostvars['localhost']['tmp_cnidir']['path'] }}/"
-        dest: "{{ win_temp_cni_dir }}"
+        dest: "{{ win_temp_cni_dir.path }}"
 
     - name: Get ignition file
       win_get_url:
@@ -154,7 +152,7 @@
       with_items: "{{ node_csrs.stdout_lines }}"
 
     - name: Run hybrid overlay
-      win_shell: "{{ win_temp_dir.path }}\\hybrid-overlay.exe --node  {{ item }} --k8s-kubeconfig c:\k\kubeconfig"
+      win_shell: "{{ win_temp_dir.path }}\\hybrid-overlay.exe --node  {{ item }} --k8s-kubeconfig c:\\k\\kubeconfig"
       with_items: "{{ hostvars['localhost']['windows_nodes_without_worker_labels.stdout_lines'] }}"
 
     - name: Run WMCB cni config
