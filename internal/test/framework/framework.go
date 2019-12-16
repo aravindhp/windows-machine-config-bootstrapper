@@ -237,6 +237,9 @@ func (f *TestFramework) getSSHClient() error {
 
 // TearDown tears down the set up done for test suite
 func (f *TestFramework) TearDown() {
+	if err := f.SSHClient.Close(); err != nil {
+		log.Printf("unable to close SSH client connection: %v", err)
+	}
 	if err := f.cloudProvider.DestroyWindowsVMs(); err != nil {
 		log.Fatalf("failed tearing down the Windows VM with error: %v", err)
 	}

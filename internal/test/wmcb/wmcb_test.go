@@ -2,9 +2,13 @@ package wmcb
 
 import (
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pkg/sftp"
@@ -19,7 +23,9 @@ const (
 	// remote powershell session opened
 	remotePowerShellCmdPrefix = "powershell.exe -NonInteractive -ExecutionPolicy Bypass "
 	// nodeLabels represents the node label that need to be applied to the Windows node created
-	nodeLabel = "node.openshift.io/os_id=Windows"
+	nodeLabel          = "node.openshift.io/os_id=Windows"
+	wmcbUnitTestBinary = "wmcb_unit_test.exe"
+	wmcbE2ETestBinary  = "wmcb_e2e_test.exe"
 )
 
 var (
@@ -35,38 +41,83 @@ var (
 		"Absolute path of the binary to be transferred")
 )
 
-// TestWMCBUnit runs the unit tests for WMCB
-func TestWMCBUnit(t *testing.T) {
-	// Transfer the binary to the windows using scp
-	defer framework.SSHClient.Close()
+//copyTestBinaryToWindowsVM copies the test binary to the Windows VM created as part of the test framework
+func copyTestBinaryToWindowsVM(filename string) error {
 	sftp, err := sftp.NewClient(framework.SSHClient)
-	require.NoError(t, err, "sftp client initialization failed")
+	if err != nil {
+		return fmt.Errorf("sftp client initialization failed: %v", err)
+	}
 	defer sftp.Close()
+
 	f, err := os.Open(*binaryToBeTransferred)
-	require.NoError(t, err, "error opening binary file to be transferred")
-	dstFile, err := sftp.Create(framework.RemoteDir + "\\" + "wmcb_unit_test.exe")
-	require.NoError(t, err, "error opening binary file to be transferred")
+	if err != nil {
+		return fmt.Errorf("unable to open binary file to be transferred: %v", err)
+	}
+
+	dstFile, err := sftp.Create(filepath.Join(framework.RemoteDir, filename))
+	if err != nil {
+		return fmt.Errorf("unable to create remote file: %v", err)
+	}
+
 	_, err = io.Copy(dstFile, f)
-	require.NoError(t, err, "error copying binary to the Windows VM")
+	if err != nil {
+		return fmt.Errorf("unable to copy binary to the Windows VM: %v", err)
+	}
 
 	// Forcefully close it so that we can execute the binary later
-	dstFile.Close()
+	err = dstFile.Close()
+	if err != nil {
+		log.Printf("error closing %s: %v", dstFile.Name(), err)
+	}
 
+	return nil
+}
+
+// remoteExecuteTestBinary executes the test binary remotely on the Windows VM created as part of the test framework
+func remoteExecuteTestBinary(filename string) error {
 	stdout := os.Stdout
 	r, w, err := os.Pipe()
-	assert.NoError(t, err, "error opening pipe to read stdout")
+	if err != nil {
+		return fmt.Errorf("unable to open pipe to read stdout: %v", err)
+	}
 	os.Stdout = w
 
 	// Remotely execute the test binary.
-	_, err = framework.WinrmClient.Run(remotePowerShellCmdPrefix+framework.RemoteDir+"\\"+
-		"wmcb_unit_test.exe --test.v",
-		os.Stdout, os.Stderr)
-	assert.NoError(t, err, "error while executing the test binary remotely")
+	_, err = framework.WinrmClient.Run(remotePowerShellCmdPrefix+filepath.Join(framework.RemoteDir,
+		wmcbUnitTestBinary)+" --test.v", os.Stdout, os.Stderr)
+	if err != nil {
+		return fmt.Errorf("unable to execute the test binary remotely: %v", err)
+	}
 	w.Close()
+
 	out, err := ioutil.ReadAll(r)
-	assert.NoError(t, err, "error reading stdout from the remote Windows VM")
+	if err != nil {
+		return fmt.Errorf("unable to read stdout from the remote Windows VM: %v", err)
+	}
+
 	os.Stdout = stdout
-	assert.NotContains(t, string(out), "FAIL")
+
+	// Log the test output
+	log.Printf("%s", out)
+
+	if strings.Contains(string(out), "FAIL") {
+		return fmt.Errorf("%s remote test failure", filename)
+	}
+
+	if !strings.Contains(string(out), "PASS") {
+		return fmt.Errorf("%s remote test failure", filename)
+	}
+	return nil
+}
+
+// TestWMCBUnit runs the unit tests for WMCB
+func TestWMCBUnit(t *testing.T) {
+	// Transfer the binary to the windows using scp
+	err := copyTestBinaryToWindowsVM(wmcbUnitTestBinary)
+	require.NoErrorf(t, err, "error copying %s to Windows VM", wmcbUnitTestBinary)
+
+	err = remoteExecuteTestBinary(wmcbUnitTestBinary)
+	assert.NoError(t, err, "unit test failure")
 }
 
 // hasWindowsTaint returns true if the given Windows node has the Windows taint
