@@ -83,13 +83,16 @@ func remoteExecuteTestBinary(filename string) error {
 	os.Stdout = w
 
 	// Remotely execute the test binary.
-	_, err = framework.WinrmClient.Run(remotePowerShellCmdPrefix+filepath.Join(framework.RemoteDir,
-		wmcbUnitTestBinary)+" --test.v", os.Stdout, os.Stderr)
+	exitCode, err := framework.WinrmClient.Run(remotePowerShellCmdPrefix+filepath.Join(framework.RemoteDir,
+		wmcbUnitTestBinary)+"--test.v", os.Stdout, os.Stderr)
 	if err != nil {
 		return fmt.Errorf("unable to execute the test binary remotely: %v", err)
 	}
-	w.Close()
+	if exitCode != 0 {
+		return fmt.Errorf("remote test binary returned %d exit code", exitCode)
+	}
 
+	w.Close()
 	out, err := ioutil.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("unable to read stdout from the remote Windows VM: %v", err)

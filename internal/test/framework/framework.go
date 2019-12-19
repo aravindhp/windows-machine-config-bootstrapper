@@ -16,6 +16,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+type testType string
+
 const (
 	// user for the Windows node created.
 	// TODO: remove this hardcoding to any user.
@@ -24,7 +26,9 @@ const (
 	winRMPort = 5986
 	// remotePowerShellCmdPrefix holds the powershell prefix that needs to be prefixed to every command run on the
 	// remote powershell session opened
-	remotePowerShellCmdPrefix = "powershell.exe -NonInteractive -ExecutionPolicy Bypass "
+	remotePowerShellCmdPrefix          = "powershell.exe -NonInteractive -ExecutionPolicy Bypass "
+	WMCB                      testType = "WMCB"
+	WSU                       testType = "WSU"
 )
 
 // TestFramework holds the info to run the test suite.
@@ -48,7 +52,7 @@ type TestFramework struct {
 
 // Setup sets up the Windows node so that it can join the existing OpenShift cluster
 // TODO: move this to return error and do assertions there
-func (f *TestFramework) Setup() {
+func (f *TestFramework) Setup(tt testType) {
 	if err := f.createWindowsVM(); err != nil {
 		log.Fatalf("failed to create Windows VM: %v", err)
 	}
@@ -75,6 +79,12 @@ func (f *TestFramework) Setup() {
 	}
 	if err := f.getOpenShiftConfigClient(); err != nil {
 		log.Fatalf("failed to get kube client with error: %v", err)
+	}
+
+	if tt == WMCB {
+		if err := f.setupVMForWMCB(); err != nil {
+			log.Fatalf("failed to setup VM for WMCB: %v", err)
+		}
 	}
 }
 
@@ -137,7 +147,7 @@ func (f *TestFramework) createWindowsVM() error {
 	// Using an AMD instance type, as the Windows hybrid overlay currently does not work on on machines using
 	// the Intel 82599 network driver
 	instanceType := "m5a.large"
-	sshKey := "libra"
+	sshKey := "openshift-dev"
 	cloud, err := cloudprovider.CloudProviderFactory(kubeconfig, awsCredentials, "default", artifactDir,
 		imageID, instanceType, sshKey, privateKeyPath)
 	if err != nil {
@@ -232,6 +242,11 @@ func (f *TestFramework) getSSHClient() error {
 		return fmt.Errorf("failed to dial to ssh server: %s", err)
 	}
 	f.SSHClient = sshClient
+	return nil
+}
+
+func (f *TestFramework) setupVMForWMCB() error {
+
 	return nil
 }
 
