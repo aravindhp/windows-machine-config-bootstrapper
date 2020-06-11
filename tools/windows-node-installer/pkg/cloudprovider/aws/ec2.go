@@ -45,8 +45,6 @@ const (
 
 // Constant value
 const (
-	// Winrm port for https request
-	WINRM_PORT = 5986
 	// winUser is the user used to login into the instance
 	winUser = "Administrator"
 )
@@ -125,7 +123,7 @@ func newSession(credentialPath, credentialAccountID, region string) (*awssession
 // - logs id and security group information of the created instance in 'windows-node-installer.json' file at the
 // resourceTrackerDir.
 // On success, the function outputs RDP access information in the commandline interface. It also returns the
-// the Windows VM Object to interact with using SSH, Winrm etc.
+// the Windows VM Object to interact with using SSH.
 func (a *AwsProvider) CreateWindowsVM() (windowsVM types.WindowsVM, err error) {
 	w := &types.Windows{}
 	// If no AMI was provided, use the latest Windows AMI
@@ -150,20 +148,21 @@ func (a *AwsProvider) CreateWindowsVM() (windowsVM types.WindowsVM, err error) {
 		return nil, fmt.Errorf("failed to get cluster worker IAM, %v", err)
 	}
 
-	// PowerShell script to setup WinRM for Ansible, installing OpenSSH server and open firewall
-	// port number 10250 on the Windows node created
-	userDataWinrm := `<powershell>
-        $url = "https://raw.githubusercontent.com/ansible/ansible/devel/examples/scripts/ConfigureRemotingForAnsible.ps1"
-        $file = "$env:temp\ConfigureRemotingForAnsible.ps1"
-        (New-Object -TypeName System.Net.WebClient).DownloadFile($url,  $file)
-        & $file
+	// PowerShell script to setup OpenSSH server and open firewall port number 10250 on the Windows node created
+	userData := `<powershell>
         Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
         New-NetFirewallRule -DisplayName "` + types.FirewallRuleName + `"
         -Direction Inbound -Action Allow -Protocol TCP -LocalPort ` + types.ContainerLogsPort + ` -EdgeTraversalPolicy Allow
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+        Install-Module -Force OpenSSHUtils -Scope AllUsers
+        Set-Service -Name ssh-agent -StartupType ‘Automatic’
+        Set-Service -Name sshd -StartupType ‘Automatic’
+        Start-Service ssh-agent
+        Start-Service sshd
         </powershell>
         <persist>true</persist>`
 
-	instance, err := a.createInstance(a.imageID, a.instanceType, a.sshKey, networkInterface, workerIAM, userDataWinrm)
+	instance, err := a.createInstance(a.imageID, a.instanceType, a.sshKey, networkInterface, workerIAM, userData)
 
 	if err != nil {
 		return nil, err
@@ -204,18 +203,9 @@ func (a *AwsProvider) CreateWindowsVM() (windowsVM types.WindowsVM, err error) {
 	credentials := types.NewCredentials(instanceID, publicIPAddress, decryptedPassword, winUser)
 	w.Credentials = credentials
 
-	// Setup Winrm and SSH client so that we can interact with the Windows Object we created
-	if err := w.SetupWinRMClient(); err != nil {
-		return nil, fmt.Errorf("failed to setup winRM client for the Windows VM: %v", err)
-	}
 	// Wait for some time before starting configuring of ssh server. This is to let sshd service be available
 	// in the list of services
-	// TODO: Parse the output of the `Get-Service sshd, ssh-agent` on the Windows node to check if the windows nodes
-	// has those services present
-	time.Sleep(time.Minute)
-	if err := w.ConfigureOpenSSHServer(); err != nil {
-		return w, fmt.Errorf("failed to configure OpenSSHServer on the Windows VM: %v", err)
-	}
+	time.Sleep(2*time.Minute)
 	if err := w.GetSSHClient(); err != nil {
 		return w, fmt.Errorf("failed to get ssh client for the Windows VM created: %v", err)
 	}
@@ -585,9 +575,9 @@ func (a *AwsProvider) getInfrastructureVPC(infraID string) (*ec2.Vpc, error) {
 }
 
 // handleSg handles the Windows security group activities like finding, creating, verifying sg and updating them for
-// WinRM, SSH and RDP access for Windows instance and allow all traffic within the VPC. If no such security group exists,
-// it creates a security group under the VPC with a group name '<infraID>-windows-worker-sg'. It then verifies if the sg
-// contains all the rules required for RDP and updates them.
+// SSH and RDP access for Windows instance and allow all traffic within the VPC. If no such security group exists, it
+// creates a security group under the VPC with a group name '<infraID>-windows-worker-sg'. It then verifies if the
+// security group contains all the rules required for RDP and updates them.
 // The function returns security group ID or error for both finding or creating a security group.
 func (a *AwsProvider) handleSg(infraID string, vpc *ec2.Vpc) (string, error) {
 	myIP, err := GetMyIp()
@@ -595,7 +585,9 @@ func (a *AwsProvider) handleSg(infraID string, vpc *ec2.Vpc) (string, error) {
 		return "", fmt.Errorf("error getting IP: %s", err)
 	}
 	sg, err := a.findWindowsWorkerSg(infraID)
+	sgType := "existing"
 	if err != nil {
+		sgType = "new"
 		createdSG, err := a.createWindowsWorkerSg(infraID, vpc)
 		if err != nil {
 			return "", fmt.Errorf("error creating new security group: %s", err)
@@ -614,7 +606,7 @@ func (a *AwsProvider) handleSg(infraID string, vpc *ec2.Vpc) (string, error) {
 	// updated in the sg and update them.
 	_, err = a.verifyAndUpdateSg(myIP, sg, vpc)
 
-	log.Printf(fmt.Sprintf("Using existing Security Group: %s", *sg.GroupId))
+	log.Printf(fmt.Sprintf("Using %s Security Group: %s", sgType, *sg.GroupId))
 
 	return *sg.GroupId, nil
 }
@@ -642,7 +634,7 @@ func (a *AwsProvider) createWindowsWorkerSg(infraID string, vpc *ec2.Vpc) (*ec2.
 	sgName := strings.Join([]string{infraID, "windows", "worker", "sg"}, "-")
 	sg, err := a.EC2.CreateSecurityGroup(&ec2.CreateSecurityGroupInput{
 		GroupName:   aws.String(sgName),
-		Description: aws.String("security group for RDP, winrm, ssh and all traffic within VPC"),
+		Description: aws.String("security group for RDP, ssh and all traffic within VPC"),
 		VpcId:       vpc.VpcId,
 	})
 	if err != nil {
@@ -733,9 +725,6 @@ func examineRulesInSg(myIP string, rules []*ec2.IpPermission, vpcCidr string) ([
 		}
 	}
 	// Add ports that need to be updated in a slice ports
-	if !portTracker[WINRM_PORT] {
-		ports = append(ports, WINRM_PORT)
-	}
 	if !portTracker[types.SshPort] {
 		ports = append(ports, types.SshPort)
 	}

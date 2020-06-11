@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -148,7 +147,6 @@ func testCreateVM(t *testing.T) {
 
 	t.Run("check if Windows VM LB is same as Worker LB", testIfWindowsNodeIsBehindWorkerLB)
 	t.Run("check if required security rules are present", testRequiredRules)
-	t.Run("check if ansible is able to ping on the WinRmHttps port", testAnsiblePing)
 	t.Run("check if container logs port is open in Windows firewall", testAzureInstancesFirewallRule)
 	t.Run("check if SSH connection is available", testAzureSSHConnection)
 
@@ -177,7 +175,6 @@ func constructRequiredRules() (map[string]*requiredRule,
 
 	requiredRules := make(map[string]*requiredRule)
 	requiredRules[rdpRuleName] = &requiredRule{rdpRuleName, myIP, rdpPort, rdpRulePriority, false}
-	requiredRules[winRMRuleName] = &requiredRule{winRMRuleName, myIP, winRMPort, winRMPortPriority, false}
 	requiredRules[vnetRuleName] = &requiredRule{vnetRuleName, to.StringPtr("10.0.0.0/16"), vnetPorts,
 		vnetRulePriority, false}
 	requiredRules[sshRuleName] = &requiredRule{sshRuleName, myIP, sshPort,
@@ -445,49 +442,6 @@ func testRequiredRules(t *testing.T) {
 		for _, reqRule := range azureInfo.requiredRules {
 			reqRule.present = false
 		}
-	}
-}
-
-// createHostFile creates an ansible host file and returns the path of it
-func createHostFile(ip, password string) (string, error) {
-	hostFile, err := ioutil.TempFile("", "test")
-	if err != nil {
-		return "", fmt.Errorf("coud not make temporary file: %s", err)
-	}
-	defer hostFile.Close()
-
-	// Give a loop back ip as internal ip, this would never show up as
-	// private ip for any cloud provider. This is a dummy value for testing
-	// purposes. This is a hack to avoid changes to the Credentials struct or
-	// making cloud provider API calls at this juncture and it would need to be fixed
-	// if we ever want to add Azure e2e tests.
-	// TODO: Remove this and get the ip address from the cloud provider
-	// 		 using instance ID from the node object
-	loopbackIP := "127.0.0.1"
-	_, err = hostFile.WriteString(fmt.Sprintf(`[win]
-%s ansible_password=%s private_ip=%s
-[win:vars]
-ansible_user=core
-ansible_port=%s
-ansible_connection=winrm
-ansible_winrm_server_cert_validation=ignore`, ip, password, loopbackIP, winRMPort))
-	return hostFile.Name(), err
-}
-
-// testAnsiblePing checks if ansible is able to ping on opened winRmHttps port
-func testAnsiblePing(t *testing.T) {
-	// TODO: Do not iterate on the instances but instead pass the credentials object
-	//  for test function
-	for _, vmName := range instanceIDs {
-		ipAddress, password, err := getIpPass(vmName)
-		require.NoErrorf(t, err, "failed to read file %s", vmName)
-		assert.NotEmpty(t, ipAddress, "the IP address can't be empty")
-		assert.NotEmpty(t, password, "the password can't be empty")
-		hostFileName, err := createHostFile(ipAddress, password)
-		require.NoError(t, err, "failed to create a temp file")
-		pingCmd := exec.Command("ansible", "win", "-i", hostFileName, "-m", "win_ping")
-		out, err := pingCmd.CombinedOutput()
-		assert.NoErrorf(t, err, "ansible ping check failed with error: %s", string(out))
 	}
 }
 

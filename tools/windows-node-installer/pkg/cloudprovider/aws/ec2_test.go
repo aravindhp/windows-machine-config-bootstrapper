@@ -133,7 +133,6 @@ func TestGetRulesForSgUpdate(t *testing.T) {
 			in:   []*ec2.IpPermission{},
 			expected: []*ec2.IpPermission{
 				getAllPortRule(vpcCidr),
-				getOtherPortRules(WINRM_PORT, myIP),
 				getOtherPortRules(types.SshPort, myIP),
 				getOtherPortRules(rdpPort, myIP),
 			},
@@ -142,7 +141,6 @@ func TestGetRulesForSgUpdate(t *testing.T) {
 		{
 			name: "Partial input from current IP",
 			in: []*ec2.IpPermission{
-				getOtherPortRules(WINRM_PORT, myIP),
 			},
 			expected: []*ec2.IpPermission{
 				getAllPortRule(vpcCidr),
@@ -154,7 +152,6 @@ func TestGetRulesForSgUpdate(t *testing.T) {
 		{
 			name: "Complete input from current IP",
 			in: []*ec2.IpPermission{
-				getOtherPortRules(WINRM_PORT, myIP),
 				getOtherPortRules(types.SshPort, myIP),
 				getOtherPortRules(rdpPort, myIP),
 			},
@@ -167,10 +164,8 @@ func TestGetRulesForSgUpdate(t *testing.T) {
 			name: "Partial input from other IP",
 			in: []*ec2.IpPermission{
 				getAllPortRule(vpcCidr),
-				getOtherPortRules(WINRM_PORT, otherIP),
 			},
 			expected: []*ec2.IpPermission{
-				getOtherPortRules(WINRM_PORT, myIP),
 				getOtherPortRules(types.SshPort, myIP),
 				getOtherPortRules(rdpPort, myIP),
 			},
@@ -180,12 +175,10 @@ func TestGetRulesForSgUpdate(t *testing.T) {
 			name: "Complete input from other IP",
 			in: []*ec2.IpPermission{
 				getAllPortRule(vpcCidr),
-				getOtherPortRules(WINRM_PORT, otherIP),
 				getOtherPortRules(types.SshPort, otherIP),
 				getOtherPortRules(rdpPort, otherIP),
 			},
 			expected: []*ec2.IpPermission{
-				getOtherPortRules(WINRM_PORT, myIP),
 				getOtherPortRules(types.SshPort, myIP),
 				getOtherPortRules(rdpPort, myIP),
 			},

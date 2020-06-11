@@ -33,12 +33,6 @@ const (
 	sourcePortRange = "*"
 	// the '*' is used to match all the source IP addresses
 	destinationAddressPrefix = "*"
-	// winRMPort is the secure WinRM port
-	winRMPort = "5986"
-	// winRMPortPriority is the priority for the WinRM rule
-	winRMPortPriority = 600
-	// winRMRuleName security group rule name for the WinRM rule
-	winRMRuleName = "WinRM"
 	// rdpPort is the RDP port
 	rdpPort = "3389"
 	// rdpRulePriority is the priority for the RDP rule
@@ -189,8 +183,6 @@ func constructRequiredRules(rulesClient network.SecurityRulesClient, resourceGro
 	requiredRules := make(map[string]*nsgRuleWrapper)
 	requiredRules[rdpRuleName] = &nsgRuleWrapper{rulesClient, resourceGroupName, rdpRuleName, myIP, rdpPort,
 		rdpRulePriority, network.SecurityRule{}}
-	requiredRules[winRMRuleName] = &nsgRuleWrapper{rulesClient, resourceGroupName, winRMRuleName, myIP, winRMPort,
-		winRMPortPriority, network.SecurityRule{}}
 	requiredRules[vnetRuleName] = &nsgRuleWrapper{rulesClient, resourceGroupName, vnetRuleName,
 		to.StringPtr("10.0.0.0/16"), vnetPorts, vnetRulePriority, network.SecurityRule{}}
 	requiredRules[sshRuleName] = &nsgRuleWrapper{rulesClient, resourceGroupName, sshRuleName, myIP, strconv.Itoa(types.SshPort),
@@ -447,13 +439,10 @@ func (az *AzureProvider) ensureSecurityGroupRules(ctx context.Context, nsgRules 
 		switch *nsgRule.Name {
 		case rdpRuleName:
 			az.requiredRules[rdpRuleName].SecurityRule = nsgRule
-		case winRMRuleName:
-			az.requiredRules[winRMRuleName].SecurityRule = nsgRule
 		case vnetRuleName:
 			az.requiredRules[vnetRuleName].SecurityRule = nsgRule
 		}
-		if az.requiredRules[rdpRuleName].Name != nil && az.requiredRules[winRMRuleName].Name != nil &&
-			az.requiredRules[vnetRuleName].Name != nil {
+		if az.requiredRules[rdpRuleName].Name != nil &&	az.requiredRules[vnetRuleName].Name != nil {
 			break
 		}
 	}
@@ -703,77 +692,22 @@ func (az *AzureProvider) getPublicIPAddress(ctx context.Context) (ipAddress *str
 	return
 }
 
-// constructAdditionalContent constructs the commands needed to be executed on first login into the Windows node.
-func constructAdditionalContent(instanceName, adminPassword string) *[]compute.AdditionalUnattendContent {
-	// On first time Logon it will copy the custom file injected to a temporary directory
-	// on windows node, and then it will execute the steps inside the custom script
-	// which will configure winRM Https & Http listeners running on port 5986 & 5985 respectively.
-	firstLogonData :=
-		"<FirstLogonCommands> " +
-			"<SynchronousCommand> " +
-			"<CommandLine>cmd /c mkdir \"%TEMP%\"\\script</CommandLine> " +
-			"<Description>Create the script directory</Description> " +
-			"<Order>11</Order> " +
-			"</SynchronousCommand> " +
-			"<SynchronousCommand> " +
-			"<CommandLine>cmd /c copy C:\\AzureData\\CustomData.bin " +
-			"\"%TEMP%\"\\script\\winrm.ps1\"</CommandLine> " +
-			"<Description>Move the CustomData file to the working directory</Description> " +
-			"<Order>12</Order>" +
-			"</SynchronousCommand> " +
-			"<SynchronousCommand> " +
-			"<CommandLine>cmd /c powershell.exe -sta -ExecutionPolicy Unrestricted -file " +
-			"\"%TEMP%\"\\script\\winrm.ps1</CommandLine> " +
-			"<Description>Execute the WinRM enabling script</Description> " +
-			"<Order>13</Order> " +
-			"</SynchronousCommand> " +
-			"</FirstLogonCommands>"
-
-	autoLogonData := fmt.Sprintf("<AutoLogon><Domain>%s</Domain><Username>%s</Username><Password><Value>%s</Value></Password>"+
-		"<LogonCount>1</LogonCount><Enabled>true</Enabled></AutoLogon>", instanceName, winUser, adminPassword)
-	additionalContent := &[]compute.AdditionalUnattendContent{
-		{
-			// OobeSystem is a configuration setting that is applied during the end-user first boot experience, also
-			// called as Out-Of-Box experience. The configuration settings are processed before user first logon
-			// to the Windows node. It is a const provided by the azure SDK module.
-			PassName: "OobeSystem",
-			// Microsoft-Windows-Shell-Setup contains elements and settings that control how the Windows shell need to
-			// be installed. This component is selected so that AutoLogon and FirstLogonCommands settings can be used.
-			// Currently the azure SDK module allows only to set up shell component.
-			ComponentName: "Microsoft-Windows-Shell-Setup",
-			// AutoLogon specifies credentials for an account that is used to automatically log on to the
-			// windows node.
-			SettingName: "AutoLogon",
-			Content:     to.StringPtr(autoLogonData),
-		},
-		{
-			PassName:      "OobeSystem",
-			ComponentName: "Microsoft-Windows-Shell-Setup",
-			// FirstLogonCommands specifies commands to run the first time that an end user logs on to the windows node.
-			SettingName: "FirstLogonCommands",
-			Content:     to.StringPtr(firstLogonData),
-		},
-	}
-	return additionalContent
-}
-
 // constructOSProfile constructs the OS Profile for the creation of windows instance. The OS Profile consists of information
 // such as configuring remote management listeners, instance access setup.
 func (az *AzureProvider) constructOSProfile(ctx context.Context) (osProfile *compute.OSProfile, vmName, password string) {
 	instanceName := windowsWorker + randomString(5)
 	adminPassword := randomPasswordString(12)
-	additionalContent := constructAdditionalContent(instanceName, adminPassword)
 
-	// the data runs the script from the url location, script sets up both HTTP & HTTPS WinRM listeners so that
-	// ansible can connect to it and run remote scripts on the windows node. Also open firewall port number 10250.
-	data := `$url = "https://raw.githubusercontent.com/ansible/ansible/devel/examples/scripts/ConfigureRemotingForAnsible.ps1"
-    $file = "$env:temp\ConfigureRemotingForAnsible.ps1"
-    (New-Object -TypeName System.Net.WebClient).DownloadFile($url,  $file)
-    & $file
-    Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-    Start-Service sshd
-    New-NetFirewallRule -DisplayName "` + types.FirewallRuleName + `"
-    -Direction Inbound -Action Allow -Protocol TCP -LocalPort ` + types.ContainerLogsPort + ` - EdgeTraversalPolicy Allow`
+	// the custom data to setup OpenSSH server and open firewall port number 10250.
+	data := `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+        New-NetFirewallRule -DisplayName "` + types.FirewallRuleName + `"
+        -Direction Inbound -Action Allow -Protocol TCP -LocalPort ` + types.ContainerLogsPort + ` -EdgeTraversalPolicy Allow
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+        Install-Module -Force OpenSSHUtils -Scope AllUsers
+        Set-Service -Name ssh-agent -StartupType ‘Automatic’
+        Set-Service -Name sshd -StartupType ‘Automatic’
+        Start-Service ssh-agent
+        Start-Service sshd`
 
 	var nodeLocation string
 	if !checkForNil(az.getvnetLocation(ctx)) {
@@ -789,7 +723,6 @@ func (az *AzureProvider) constructOSProfile(ctx context.Context) (osProfile *com
 			ProvisionVMAgent:          to.BoolPtr(true),
 			EnableAutomaticUpdates:    to.BoolPtr(false),
 			TimeZone:                  to.StringPtr(timeZoneMap[nodeLocation]),
-			AdditionalUnattendContent: additionalContent,
 		},
 	}
 	return osProfile, instanceName, adminPassword
@@ -979,16 +912,6 @@ func (az *AzureProvider) CreateWindowsVM() (types.WindowsVM, error) {
 	credentials := types.NewCredentials(instanceName, *publicIPAddress, adminPassword, winUser)
 	w.Credentials = credentials
 
-	// Setup Winrm and SSH client so that we can interact with the Windows Object we created
-	if err := w.SetupWinRMClient(); err != nil {
-		return nil, fmt.Errorf("failed to setup winRM client for the Windows VM: %v", err)
-	}
-
-	// Wait for some time before starting configuring of ssh server. This is to let sshd service be available
-	// in the list of services
-	// TODO: Parse the output of the `Get-Service sshd, ssh-agent` on the Windows node to check if the windows nodes
-	// has those services present
-	time.Sleep(time.Minute)
 	if err := w.GetSSHClient(); err != nil {
 		return w, fmt.Errorf("failed to get ssh client for the Windows VM created: %v", err)
 	}
@@ -1135,7 +1058,7 @@ func (az *AzureProvider) deleteSpecificRule(s []network.SecurityRule, name strin
 	return
 }
 
-// deleteNSGRules deletes the rdp, vnet and WinRM traffic rules from the worker subnet security group rules.
+// deleteNSGRules deletes the rdp and vnet traffic rules from the worker subnet security group rules.
 func (az *AzureProvider) deleteNSGRules(ctx context.Context, nsgName string) (err error) {
 	_, err = az.nsgClient.Get(ctx, az.resourceGroupName, nsgName, "")
 	if err != nil {
